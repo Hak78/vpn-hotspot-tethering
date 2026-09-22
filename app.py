@@ -1,95 +1,90 @@
 #!/usr/bin/env python3
-import os
+import socket
+import select
+import threading
 import sys
-import subprocess
-import time
 
-def check_root():
-    """التحقق من تشغيل السكريبت بصلاحيات المسؤول الضرورية للتحكم بالشبكة"""
-    if os.geteuid() != 0:
-        print("\033[91m[-] خطأ: يجب تشغيل هذا التطبيق بصلاحيات الـ Root (استخدم sudo).\033[0m")
-        sys.exit(1)
+# إعدادات البروكسي
+HOST = "0.0.0.0"  # لكي يسمح بمرور البيانات من جميع الأجهزة المتصلة بالـ Wi-Fi
+PORT = 8080       # المنفذ الذي ستتصل به الأجهزة الأخرى
 
-def enable_ip_forwarding():
-    """تفعيل تمرير حزم البيانات داخل نواة النظام"""
-    print("[+] جاري تفعيل IP Forwarding...")
+def handle_client(client_socket):
+    """معالجة حزم البيانات وتوجيهها بين جهازك والإنترنت (عبر الـ VPN النشط)"""
     try:
-        subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=1"], check=True, stdout=subprocess.DEVNULL)
+        # قراءة السطر الأول من طلب العميل لمعرفة الوجهة
+        request = client_socket.recv(4096)
+        if not request:
+            client_socket.close()
+            return
+
+        # استخراج عنوان الموقع والمنفذ المستهدف
+        first_line = request.decode('utf-8', errors='ignore').split('\n')[0]
+        url = first_line.split(' ')[1]
+        
+        # التعامل مع طلبات HTTPS (CONNECT) أو HTTP العادية
+        if "://" in url:
+            url = url.split("://")[1]
+        
+        if ":" in url:
+            target_host, target_port = url.split(":")[:2]
+            target_port = int(target_port)
+        else:
+            target_host = url
+            target_port = 80 if first_line.startswith("GET") else 443
+
+        # إنشاء اتصال مع الموقع المستهدف (سيمر تلقائياً عبر الـ VPN المفتوح في هاتفك)
+        remote_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        remote_socket.connect((target_host, target_port))
+
+        # إذا كان الطلب HTTPS، نرسل رد نجاح للعميل لفتح النفق المشفر
+        if first_line.startswith("CONNECT"):
+            client_socket.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        else:
+            remote_socket.sendall(request)
+
+        # نقل البيانات في الاتجاهين بشكل متوازٍ ومستمر
+        sockets = [client_socket, remote_socket]
+        while True:
+            readable, _, _ = select.select(sockets, [], [])
+            if client_socket in readable:
+                data = client_socket.recv(4096)
+                if not data: break
+                remote_socket.sendall(data)
+            if remote_socket in readable:
+                data = remote_socket.recv(4096)
+                if not data: break
+                client_socket.sendall(data)
+
     except Exception as e:
-        print(f"[-] فشل تفعيل IP Forwarding: {e}")
+        pass
+    finally:
+        client_socket.close()
+
+def start_proxy():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        server.bind((HOST, PORT))
+        server.listen(100)
+        print("="*60)
+        print("    🚀 مشروع GitHub: مشاركة الـ VPN بدون Root (HTTP Proxy)   ")
+        print("="*60)
+        print(f"[+] خادم المشاركة يعمل الآن بنجاح على المنفذ: {PORT}")
+        print("[+] متاح لجميع الأجهزة المتصلة بنقطة اتصال جهازك الحالي.")
+        print("[*] لإيقاف التطبيق اضغط: Ctrl + C")
+    except Exception as e:
+        print(f"[-] فشل بدء الخادم: {e}")
         sys.exit(1)
 
-def setup_routing(wifi_interface, vpn_interface):
-    """إعداد جدار الحماية (iptables) لتوجيه حركة مرور الـ Wi-Fi عبر نفق الـ VPN"""
-    print(f"[+] جاري إعداد قواعد التوجيه: {wifi_interface} ===> {vpn_interface}")
     try:
-        # تنظيف الجداول السابقة لتفادي التضارب
-        subprocess.run(["iptables", "-F"], check=True)
-        subprocess.run(["iptables", "-t", "nat", "-F"], check=True)
-        
-        # السماح بتمرير البيانات من الوايرلس إلى الـ VPN
-        subprocess.run(["iptables", "-A", "FORWARD", "-i", wifi_interface, "-o", vpn_interface, "-j", "ACCEPT"], check=True)
-        
-        # السماح بالبيانات العائدة (المستقرة والمرتبطة)
-        subprocess.run(["iptables", "-A", "FORWARD", "-i", vpn_interface, "-o", wifi_interface, "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"], check=True)
-        
-        # تفعيل تقنية الـ NAT (Masquerade) على واجهة الـ VPN
-        subprocess.run(["iptables", "-t", "nat", "-A", "POSTROUTING", "-o", vpn_interface, "-j", "MASQUERADE"], check=True)
-        print("\033[92m[+] تم إعداد جدار الحماية بنجاح.\033[0m")
-    except subprocess.CalledProcessError as e:
-        print(f"[-] خطأ أثناء إعداد iptables: {e}")
-        sys.exit(1)
-
-def start_hotspot(interface, ssid, password):
-    """إنشاء وبث شبكة الـ Wi-Fi باستخدام NetworkManager"""
-    print(f"[+] جاري إنشاء نقطة البث اللاسلكي باسم (SSID): {ssid}...")
-    try:
-        # حذف أي إعداد قديم لنفس النقطة تجنباً للتكرار
-        subprocess.run(["nmcli", "connection", "delete", "GitHub_VPN_Hotspot"], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-        
-        # أمر إنشاء شبكة الوايرلس وبثها فوراً
-        subprocess.run([
-            "nmcli", "device", "wifi", "hotspot", 
-            "ifname", interface, 
-            "ssid", ssid, 
-            "password", password, 
-            "name", "GitHub_VPN_Hotspot"
-        ], check=True, stdout=subprocess.DEVNULL)
-        
-        print("\033[92m[+] نقطة اتصال الـ Wi-Fi تعمل الآن ونشطة!\033[0m")
-    except subprocess.CalledProcessError:
-        print("\033[91m[-] فشل إنشاء نقطة البث. تأكد من أن كرت الشبكة يدعم وضع الـ AP (Access Point) وأن خدمة NetworkManager تعمل.\033[0m")
-        sys.exit(1)
+        while True:
+            client_sock, addr = server.accept()
+            # تشغيل خيط (Thread) منفصل لكل جهاز يتصل بالبروكسي لتفادي البطء
+            threading.Thread(target=handle_client, args=(client_sock,), daemon=True).start()
+    except KeyboardInterrupt:
+        print("\n[-] تم إيقاف خادم مشاركة الإنترنت.")
+    finally:
+        server.close()
 
 if __name__ == "__main__":
-    check_root()
-    
-    print("="*60)
-    print("      تطبيق مشاركة إنترنت الـ VPN عبر الـ Wi-Fi (GitHub Project)      ")
-    print("="*60)
-    
-    # --- إعدادات الشبكة (يمكن للمستخدم تعديلها هنا) ---
-    WIFI_INTERFACE = "wlan0"       # اسم كرت الوايرلس (تأكد منه عبر أمر ip link)
-    VPN_INTERFACE = "tun0"         # اسم كرت الـ VPN (غالباً tun0 أو wg0)
-    WIFI_SSID = "VPN_Shared_WiFi"  # اسم شبكة الواي فاي التي ستظهر للأجهزة الأخرى
-    WIFI_PASSWORD = "SharedPassword123" # كلمة المرور (8 خانات أو أكثر)
-    # --------------------------------------------------
-
-    try:
-        enable_ip_forwarding()
-        setup_routing(WIFI_INTERFACE, VPN_INTERFACE)
-        start_hotspot(WIFI_INTERFACE, WIFI_SSID, WIFI_PASSWORD)
-        
-        print("\n\033[94m[*] التطبيق يعمل بكفاءة. اتصل الآن بالشبكة واستمتع بالـ VPN المجاني!\033[0m")
-        print("[*] للخروج وإيقاف البث، اضغط على: Ctrl + C")
-        
-        # الحفاظ على السكريبت حياً
-        while True:
-            time.sleep(1)
-            
-    except KeyboardInterrupt:
-        print("\n\n[-] يتم الآن إيقاف التطبيق وإعادة إعدادات النظام الافتراضية...")
-        # تنظيف اختياري: إيقاف تمرير الحزم لحماية النظام بعد القفل
-        subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=0"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["nmcli", "connection", "down", "GitHub_VPN_Hotspot"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print("[+] تم الإغلاق بنجاح. شكراً لك!")
+    start_proxy()
