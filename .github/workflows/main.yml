@@ -17,11 +17,19 @@ jobs:
       with:
         python-version: '3.10'
 
+    # خطوة تثبيت قيود pip للبيئات الفرعية لتفادي أخطاء التوافق
+    - name: Pin pip for nested build environments
+      run: |
+        cat > "$RUNNER_TEMP/pip-constraints.txt" <<'EOF'
+        pip==24.0
+        EOF
+        echo "PIP_CONSTRAINT=$RUNNER_TEMP/pip-constraints.txt" >> "$GITHUB_ENV"
+
     - name: Install Buildozer dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y git zip unzip openjdk-17-jdk autoconf libtool pkg-config zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev libsqlite3-dev tk-dev libgdbm-compat-dev
-        pip install --upgrade pip
+        pip install --upgrade "pip==24.0"
         pip install "cython<3.0.0" buildozer  # تثبيت النسخ المستقرة والمتوافقة مع أندرويد
 
     - name: Build with Buildozer
