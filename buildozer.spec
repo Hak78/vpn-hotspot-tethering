@@ -18,8 +18,8 @@ source.include_exts = py,png,jpg,kv,atlas
 # (string) إصدار التطبيق الحالي
 version = 1.0.0
 
-# (list) المكتبات البرمجية التي يعتمد عليها التطبيق (أهمها kivy و python3)
-requirements = python3,kivy
+# (list) المكتبات البرمجية التي يعتمد عليها التطبيق (أهمها kivy و python3 مع تثبيت إصدار متوافق)
+requirements = python3,kivy,requests==2.32.3,charset-normalizer==3.4.3
 
 # (list) الأذونات البرمجية التي يحتاجها التطبيق ليعمل في نظام أندرويد
 # يحتاج التطبيق للإنترنت وحالة الشبكة لتمرير البروكسي بنجاح
