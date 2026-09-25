@@ -17,11 +17,12 @@ jobs:
       with:
         python-version: '3.10'
 
-    # خطوة تثبيت قيود pip للبيئات الفرعية لتفادي أخطاء التوافق
-    - name: Pin pip for nested build environments
+    # خطوة تثبيت قيود pip للبيئات الفرعية لتفادي أخطاء التوافق وإضافة تقييد charset-normalizer
+    - name: Pin pip and dependencies for nested build environments
       run: |
         cat > "$RUNNER_TEMP/pip-constraints.txt" <<'EOF'
         pip==24.0
+        charset-normalizer==3.4.3
         EOF
         echo "PIP_CONSTRAINT=$RUNNER_TEMP/pip-constraints.txt" >> "$GITHUB_ENV"
 
